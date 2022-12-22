@@ -46,6 +46,7 @@ Tensor query_vertical_backward(TreeSpec&, Tensor, Tensor);
 void assign_vertical(TreeSpec&, Tensor, Tensor);
 
 Tensor volume_render(TreeSpec&, RaysSpec&, RenderOptions&);
+Tensor ray_intersections(TreeSpec&, RaysSpec&, RenderOptions&, int64_t out_dim=128);
 Tensor volume_render_image(TreeSpec&, CameraSpec&, RenderOptions&);
 Tensor volume_render_backward(TreeSpec&, RaysSpec&, RenderOptions&, Tensor);
 Tensor volume_render_image_backward(TreeSpec&, CameraSpec&, RenderOptions&,
@@ -107,6 +108,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("query_vertical_backward", &query_vertical_backward);
     m.def("assign_vertical", &assign_vertical);
 
+    m.def("ray_intersections", &ray_intersections);
+    
     m.def("volume_render", &volume_render);
     m.def("volume_render_image", &volume_render_image);
     m.def("volume_render_backward", &volume_render_backward);

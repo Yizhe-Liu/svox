@@ -270,6 +270,18 @@ class N3Tree(nn.Module):
             result, node_ids = _QueryVerticalFunction.apply(
                                 self.data, self._spec(world), indices);
             return (result, node_ids) if want_node_ids else result
+    
+
+    def ray_intersections(self, rays_o, rays_d, step_size=1e-3, sigma_thresh=0, stop_thresh=1e-3, out_dim=128):
+        opts = _C.RenderOptions()
+        opts.step_size = step_size
+        opts.sigma_thresh = sigma_thresh
+        opts.stop_thresh = stop_thresh
+        rays = _C.RaysSpec()
+        rays.origins = rays_o
+        rays.dirs = rays_d
+        rays.vdirs = torch.zeros_like(rays.dirs).cuda()
+        return _C.ray_intersections(self._spec(), rays, opts, out_dim)
 
     # Special features
     def snap(self, indices):

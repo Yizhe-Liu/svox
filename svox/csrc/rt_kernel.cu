@@ -320,6 +320,68 @@ __device__ __inline__ void trace_ray(
     }
 }
 
+
+template <typename scalar_t>
+__device__ __inline__ void ray_intersections(
+        PackedTreeSpec<scalar_t>& __restrict__ tree,
+        SingleRaySpec<scalar_t> ray,
+        RenderOptions& __restrict__ opt,
+        torch::TensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, int32_t> out) {
+    const scalar_t delta_scale = _get_delta_scale(tree.scaling, ray.dir);
+
+    scalar_t tmin, tmax;
+    scalar_t invdir[3];
+    const int tree_N = tree.child.size(1);
+    const int data_dim = tree.data.size(4);
+    const int out_data_dim = out.size(0);
+
+#pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        invdir[i] = 1.0 / (ray.dir[i] + 1e-9);
+    }
+    _dda_unit(ray.origin, invdir, &tmin, &tmax);
+    size_t idx = 0;
+    if (tmax < 0 || tmin > tmax) {
+        // Ray doesn't hit box
+        return;
+    } 
+    scalar_t pos[3];
+    scalar_t light_intensity = 1.f;
+    scalar_t t = tmin;
+    scalar_t cube_sz;
+    while (t < tmax) {
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            pos[j] = ray.origin[j] + t * ray.dir[j];
+        }
+
+        int64_t node_id;
+        scalar_t* tree_val = query_single_from_root<scalar_t>(tree.data, tree.child,
+                    pos, &cube_sz, tree.weight_accum != nullptr ? &node_id : nullptr);
+
+        scalar_t att;
+        scalar_t subcube_tmin, subcube_tmax;
+        _dda_unit(pos, invdir, &subcube_tmin, &subcube_tmax);
+
+        const scalar_t t_subcube = (subcube_tmax - subcube_tmin) / cube_sz;
+        const scalar_t delta_t = t_subcube + opt.step_size;
+        scalar_t sigma = tree_val[data_dim - 1];
+        
+        if (sigma > opt.sigma_thresh) {
+            out[idx++] = t;
+            att = expf(-delta_t * delta_scale * sigma);
+            const scalar_t weight = light_intensity * (1.f - att);
+            light_intensity *= att;
+
+            if (light_intensity <= opt.stop_thresh) {   // Full opacity, stop
+                return;
+            }
+        }
+        t += delta_t;   
+    }
+    out[idx] = t;
+}
+
 template <typename scalar_t>
 __device__ __inline__ void trace_ray_backward(
     PackedTreeSpec<scalar_t>& __restrict__ tree,
@@ -732,6 +794,23 @@ __global__ void render_ray_kernel(
         out[tid]);
 }
 
+template <typename scalar_t>
+__global__ void ray_intersections_kernel(
+        PackedTreeSpec<scalar_t> tree,
+        PackedRaysSpec<scalar_t> rays,
+        RenderOptions opt,
+    torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits>
+        out) {
+    CUDA_GET_THREAD_ID(tid, rays.origins.size(0));
+    scalar_t origin[3] = {rays.origins[tid][0], rays.origins[tid][1], rays.origins[tid][2]};
+    transform_coord<scalar_t>(origin, tree.offset, tree.scaling);
+    scalar_t dir[3] = {rays.dirs[tid][0], rays.dirs[tid][1], rays.dirs[tid][2]};
+    ray_intersections<scalar_t>(
+        tree,
+        SingleRaySpec<scalar_t>{origin, dir, &rays.vdirs[tid][0]},
+        opt,
+        out[tid]);
+}
 
 template <typename scalar_t>
 __global__ void render_ray_backward_kernel(
@@ -1028,6 +1107,25 @@ torch::Tensor volume_render(TreeSpec& tree, RaysSpec& rays, RenderOptions& opt) 
     torch::Tensor result = torch::zeros({Q, out_data_dim}, rays.origins.options());
     AT_DISPATCH_FLOATING_TYPES(rays.origins.type(), __FUNCTION__, [&] {
             device::render_ray_kernel<scalar_t><<<blocks, cuda_n_threads>>>(
+                    tree, rays, opt,
+                    result.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>());
+    });
+    CUDA_CHECK_ERRORS;
+    return result;
+}
+
+torch::Tensor ray_intersections(TreeSpec& tree, RaysSpec& rays, RenderOptions& opt, int64_t out_dim=128) {
+    tree.check();
+    rays.check();
+    DEVICE_GUARD(tree.data);
+    const auto Q = rays.origins.size(0);
+
+    auto_cuda_threads();
+    const int blocks = CUDA_N_BLOCKS_NEEDED(Q, cuda_n_threads);
+
+    torch::Tensor result = torch::zeros({Q, out_dim}, rays.origins.options());
+    AT_DISPATCH_FLOATING_TYPES(rays.origins.type(), __FUNCTION__, [&] {
+            device::ray_intersections_kernel<scalar_t><<<blocks, cuda_n_threads>>>(
                     tree, rays, opt,
                     result.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>());
     });
